@@ -1,116 +1,101 @@
-# openmind-conductor
+# OpenMind Conductor
 
-Multi-agent orchestration with shared muscle memory — the **prefrontal cortex** for coordinated agents.
+**OpenMind Conductor** is a Rust multi-agent orchestration framework with shared muscle memory — the prefrontal cortex for coordinated agent ensembles. It uses musical metaphors (scores, batons, measures, harmony) to model temporal coordination among autonomous agents.
 
-## The Orchestra Metaphor
+## Why It Matters
 
-Think of a symphony orchestra. Each musician (agent) has their own instrument and muscle memory — years of practice that lets them play their part instinctively. But without a conductor, you get noise.
+Coordinating multiple AI agents requires three capabilities: (1) a shared plan (the score), (2) a communication channel (the baton), and (3) conflict resolution when agents disagree (harmony). OpenMind Conductor provides all three with a musical abstraction that maps naturally to real-time systems — beats synchronize timing, fermata pauses wait for conditions, and harmony voting resolves disagreements. The muscle memory layer persists learned patterns as JSON-serializable chord-to-trit mappings, enabling agents to load pre-trained coordination behaviors.
 
-`openmind-conductor` is that conductor. It coordinates multiple agents, each carrying their own learned patterns, to work together on complex tasks.
+## How It Works
 
-### The Cast
+### Score-Based Orchestration
 
-| Component | Role | Analogy |
-|-----------|------|---------|
-| **Ensemble** | Collection of agents | The orchestra |
-| **Score** | Pre-computed plan | The sheet music |
-| **Baton** | Communication channel | The conductor's baton |
-| **Measure** | Timing & sync | The tempo / BPM |
-| **Harmony** | Conflict resolution | Voting on interpretation |
-| **Trit** | Ternary digit (-1, 0, +1) | For / abstain / against |
+A `Score` is a sequence of `Instruction` variants:
+
+```
+Instruction::Step { agent, chord, args, timing }
+Instruction::Branch { condition, then_steps, else_steps }
+Instruction::Parallel { steps }    // fan-out
+Instruction::Fermata { condition } // wait gate
+```
+
+Conditions compare `Reading` values (last, average, count) against thresholds using `Gt`, `Lt`, `Eq`, `Gte`, `Lte`. Scores serialize to JSON for persistence and inspection.
+
+### Baton Communication
+
+The `LocalBaton` uses tokio mpsc channels (capacity 256) for in-process agent communication:
+
+```
+register(agent_id) → Receiver<FlexRequest>
+send(agent_id, request) → ()
+recv() → FlexResponse
+```
+
+Message routing is **O(1)** via HashMap lookup. Each agent gets its own bounded mailbox, preventing memory exhaustion.
+
+### Harmony Voting
+
+When agents disagree, the `Harmony` module resolves conflicts via three strategies:
+
+- **Majority**: Plurality of {+1, 0, -1} votes. Time: **O(N)** for N agents.
+- **Consensus**: Any -1 vote blocks the decision. Strictest.
+- **Weighted**: Each agent carries a weight w_i; outcome = sign(Σ w_i · v_i).
+
+Dissenters are logged for post-hoc analysis of systematic disagreements.
+
+### Muscle Memory
+
+`MuscleMemory` stores named `Pattern`s — each containing a chord string, a sequence of `Trit`s {-1, 0, +1}, and a confidence score. Patterns are loaded from JSON:
+
+```json
+{ "move_forward": { "chord": "motor.go", "trits": [1,1,0], "confidence": 0.95 } }
+```
+
+Pattern lookup: **O(1)** via HashMap.
+
+### Measure (Timing)
+
+`Measure` synchronizes execution to BPM (beats per minute). At 120 BPM, each beat = 500ms. The `downbeat()` async function sleeps until the next beat boundary. `swing()` inserts an off-beat half-beat delay. Fermata conditions support `UntilValueExceeds`, `UntilValueBelow`, `ForDuration`, and `UntilCount`.
 
 ## Quick Start
 
 ```rust
-use openmind_conductor::*;
+use openmind_conductor::{ensemble::Ensemble, memory::MuscleMemory, score::Score};
 
-// Create an ensemble with agents that have muscle memory
-let mut ensemble = ensemble::Ensemble::new();
+let mut ensemble = Ensemble::new();
+let memory = MuscleMemory::new();
+ensemble.add_agent("alpha", memory);
 
-let mut sensor_mem = memory::MuscleMemory::new();
-sensor_mem.add_pattern("read_temperature", "temp", vec![trit::Trit::PlusOne], 1.0);
-ensemble.add_agent("sensor", sensor_mem);
-
-let mut motor_mem = memory::MuscleMemory::new();
-motor_mem.add_pattern("fan_on", "motor", vec![trit::Trit::PlusOne], 1.0);
-ensemble.add_agent("motor", motor_mem);
-
-// Compose a score — the plan
-let score = score::Score::builder()
-    .step("sensor", "read_temperature", vec![], measure::Timing::Immediate)
-    .branch(
-        score::Condition::Gt(score::Reading::Last("sensor".into()), 25.0),
-        vec![score::Step::new("motor", "fan_on", vec![])],
-        vec![], // else: do nothing
-    )
+let score = Score::builder()
+    .then(agent="alpha", chord="move", args=["forward"])
     .build();
 
-// Execute
-let results = ensemble.execute_score_direct(&score).unwrap();
+let results = ensemble.conduct(& ConductIntent::new("move", 1.0))?;
 ```
 
-## Architecture
+## API
 
-### Ensemble
+| Module | Key Types |
+|--------|-----------|
+| `baton` | `LocalBaton`, `MockBaton`, `FlexRequest`, `FlexResponse` |
+| `ensemble` | `Ensemble`, `Agent`, `ConductIntent` |
+| `harmony` | `Harmony`, `VotingStrategy`, `VoteResult` |
+| `memory` | `MuscleMemory`, `Pattern` |
+| `score` | `Score`, `ScoreBuilder`, `Step`, `Instruction`, `Condition` |
+| `measure` | `Measure`, `Bpm`, `Timing`, `Fermata` |
+| `trit` | `Trit` (MinusOne, Zero, PlusOne) |
 
-An `Ensemble` holds named agents, each with their own `MuscleMemory`. You can:
-- `add_agent(id, memory)` — register an agent
-- `conduct(intent)` — simple intent-based execution
-- `execute_score_direct(score)` — score-based orchestration
+## Architecture Notes
 
-### Score
+OpenMind Conductor is the orchestration layer of the OpenMind system within SuperInstance. In γ + η = C, the conductor drives γ (growth — coordinating agents toward shared goals) while harmony voting provides η (avoidance — blocking harmful collective decisions). The `Trit` type directly implements the ternary {-1, 0, +1} conservation principle.
 
-A `Score` is a sequence of instructions:
+See [ARCHITECTURE.md](https://github.com/SuperInstance/SuperInstance/blob/main/ARCHITECTURE.md) for the OpenMind architecture.
 
-- **Steps** — do something on an agent
-- **Branches** — conditional logic (if/else)
-- **Parallel** — concurrent execution groups
-- **Fermata** — wait for a condition
+## References
 
-Scores serialize to/from JSON for persistence and transfer.
-
-### Baton
-
-Communication channels between conductor and agents:
-
-- `LocalBaton` — in-process (tokio mpsc channels)
-- `MockBaton` — for testing (records sent messages)
-
-### Measure
-
-Timing and synchronization:
-
-- **BPM** — how often the conductor checks state
-- **Downbeat** — the main loop tick
-- **Swing** — off-beat timing for async ops
-- **Fermata** — pause until a condition is met
-
-### Harmony
-
-When agents disagree, `Harmony` resolves conflicts:
-
-- **Majority** — most votes win
-- **Consensus** — any dissent blocks
-- **Weighted** — votes scaled by agent weight
-
-Uses ternary voting: `Trit::PlusOne` (for), `Trit::Zero` (abstain), `Trit::MinusOne` (against). Tracks dissent — how often each agent is overruled.
-
-## Trit
-
-The ternary digit is a first-class type:
-
-```rust
-let t = trit::Trit::from(-1); // MinusOne
-assert_eq!(t.value(), -1);
-```
-
-## Running Tests
-
-```bash
-cargo test
-```
-
-20 tests covering all modules: ensemble, score, baton, measure, harmony, and full integration.
+1. Wooldridge, M. (2009). *An Introduction to MultiAgent Systems*, 2nd ed. Wiley.
+2. Stone, P. & Veloso, M. (2000). "Multiagent Systems: A Survey from a Machine Learning Perspective." *Autonomous Robots*, 8(3), 345–383.
+3. Dijkstra, E. W. (1965). "Solution of a Problem in Concurrent Programming Control." *Communications of the ACM*, 8(9), 569.
 
 ## License
 
